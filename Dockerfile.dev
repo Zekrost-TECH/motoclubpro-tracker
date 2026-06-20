@@ -1,0 +1,38 @@
+# ── Stage 1: build ───────────────────────────────────────────────────────────
+FROM golang:1.26.1-alpine AS builder
+
+WORKDIR /app
+
+# Instalar dependencias del sistema (necesarias para compilar con CGO si aplica)
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Copiar módulos primero para cache eficiente
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copiar el resto del código
+COPY . .
+
+# Compilar binario estático (sin CGO para imagen mínima)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build \
+    -ldflags="-w -s" \
+    -o tracker \
+    ./cmd/tracker
+
+# ── Stage 2: runner (imagen final ~10MB) ─────────────────────────────────────
+FROM scratch
+
+# Certificados TLS (necesarios para llamadas HTTPS a Firebase, RUNT, etc.)
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
+# Solo el binario
+COPY --from=builder /app/tracker /tracker
+
+EXPOSE 8081
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ["/tracker", "-health"] 
+
+ENTRYPOINT ["/tracker"]
