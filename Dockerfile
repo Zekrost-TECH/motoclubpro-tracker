@@ -25,4 +25,8 @@ COPY --from=builder /app/tracker /tracker
 
 EXPOSE 8081
 
+# La imagen scratch no tiene shell ni wget: el propio binario hace el healthcheck.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD ["/tracker", "healthcheck"]
+
 ENTRYPOINT ["/tracker"]

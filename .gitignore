@@ -1,1 +1,9 @@
 .env
+
+# Binario compilado (solo en raíz, no bloquea cmd/tracker/)
+/tracker
+
+# Artefactos Go
+*.test
+*.out
+coverage.txt

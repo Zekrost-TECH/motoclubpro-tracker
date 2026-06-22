@@ -8,11 +8,31 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Claims represents the expected JWT payload
+// Club represents a club membership embedded in the JWT.
+type Club struct {
+	ClubID string `json:"club_id"`
+	Role   string `json:"role"`
+}
+
+// Claims represents the expected JWT payload emitted by the NestJS backend.
 type Claims struct {
-	Sub  string `json:"sub"`
-	Role string `json:"role"`
+	Sub   string `json:"sub"`
+	Role  string `json:"role"`
+	Clubs []Club `json:"clubs"`
 	jwt.RegisteredClaims
+}
+
+// IsClubManager returns true if the user is admin or leader of the given club.
+func (c *Claims) IsClubManager(clubID string) bool {
+	if clubID == "" {
+		return false
+	}
+	for _, club := range c.Clubs {
+		if club.ClubID == clubID && (club.Role == "admin" || club.Role == "lider") {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateJWT parses the raw Authorization header and returns the claims
@@ -28,6 +48,9 @@ func ValidateJWT(authHeader string) (*Claims, error) {
 
 	tokenStr := parts[1]
 	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, errors.New("JWT_SECRET not configured")
+	}
 
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		// Ensure the signing method is HMAC

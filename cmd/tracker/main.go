@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/auth"
 	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/hub"
 	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/middleware"
 	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/redis"
@@ -55,6 +60,11 @@ func broadcastInterval() time.Duration {
 	return time.Duration(interval) * time.Second
 }
 
+// uuidRegex matches RFC 4122 UUIDs (with or without hyphens).
+var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
+
+func isValidEventID(id string) bool { return uuidRegex.MatchString(id) }
+
 // trackKey: key individual por rider → TTL independiente por persona
 func trackKey(eventID, userID string) string {
 	return "track:" + eventID + ":" + userID
@@ -65,9 +75,60 @@ func trackPattern(eventID string) string {
 	return "track:" + eventID + ":*"
 }
 
+// Claves de autorización mantenidas por el backend (ver contrato Redis).
+func eventMembersKey(eventID string) string { return "event:" + eventID + ":members" }
+func eventClubKey(eventID string) string    { return "event:" + eventID + ":club" }
+
+// authorize decide si un rider puede ver el tracking de un evento.
+// Aislamiento multi-tenant: solo miembros del evento (RSVP) o admins/líderes
+// del club dueño del evento. El tracker NUNCA consulta Postgres: la verdad
+// de autorización la publica el backend en Redis.
+// Las funciones isMemberFn y getClubFn son inyectadas para facilitar tests.
+func authorize(
+	isMemberFn func(ctx context.Context, key string, member interface{}) (bool, error),
+	getClubFn func(ctx context.Context, key string) (string, error),
+	eventID, userID string, claims *auth.Claims,
+) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if isMember, err := isMemberFn(ctx, eventMembersKey(eventID), userID); err == nil && isMember {
+		return true
+	}
+
+	if clubID, err := getClubFn(ctx, eventClubKey(eventID)); err == nil && claims.IsClubManager(clubID) {
+		return true
+	}
+
+	return false
+}
+
+// runHealthcheck permite usar el propio binario como healthcheck en imágenes
+// scratch (sin wget/curl): `tracker healthcheck`.
+func runHealthcheck() {
+	port := os.Getenv("WS_PORT")
+	if port == "" {
+		port = "8081"
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://localhost:" + port + "/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		runHealthcheck()
+	}
+
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file, usando variables de entorno del sistema")
+	}
+
+	if os.Getenv("JWT_SECRET") == "" {
+		log.Fatal("JWT_SECRET no configurado: el tracker no puede validar tokens")
 	}
 
 	redis.InitRedis()
@@ -84,33 +145,91 @@ func main() {
 	})
 
 	app.Use("/ws", middleware.WsAuth())
-	app.Get("/ws/events/:eventId", websocket.New(handleRider))
+	app.Get("/ws/events/:eventId", websocket.New(handleRider, websocket.Config{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+	}))
 
 	go startBroadcaster()
-	go startSOSListener()
+
+	sosCtx, sosCancel := context.WithCancel(context.Background())
+	go startSOSListener(sosCtx)
 
 	port := os.Getenv("WS_PORT")
 	if port == "" {
 		port = "8081"
 	}
 
-	log.Printf("Tracker escuchando en :%s\n", port)
-	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("Error iniciando tracker: %v", err)
+	// Arrancar el servidor en una goroutine para poder hacer graceful shutdown.
+	go func() {
+		log.Printf("Tracker escuchando en :%s\n", port)
+		if err := app.Listen(":" + port); err != nil {
+			log.Fatalf("Error iniciando tracker: %v", err)
+		}
+	}()
+
+	// Graceful shutdown: cerrar conexiones WS y Redis limpiamente en deploys.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Señal de apagado recibida, cerrando tracker...")
+
+	// Detener el SOS listener primero para que cierre el pubsub antes de matar Redis.
+	sosCancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := app.ShutdownWithContext(ctx); err != nil {
+		log.Printf("Error en shutdown del servidor: %v", err)
 	}
+	if err := redis.Client.Close(); err != nil {
+		log.Printf("Error cerrando Redis: %v", err)
+	}
+	log.Println("Tracker apagado correctamente")
 }
 
-func handleRider(c *websocket.Conn) {
-	eventID := c.Params("eventId")
-	userID := c.Locals("userID").(string)
-	role := c.Locals("role").(string)
+const wsReadTimeout = 60 * time.Second
 
-	hub.GlobalHub.Register(eventID, userID, c)
+func handleRider(c *websocket.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered in handleRider: %v", r)
+		}
+	}()
+
+	eventID := c.Params("eventId")
+	if !isValidEventID(eventID) {
+		_ = c.WriteJSON(fiber.Map{"type": "error", "message": "invalid event id"})
+		_ = c.Close()
+		return
+	}
+
+	userID, _ := c.Locals("userID").(string)
+	role, _ := c.Locals("role").(string)
+	claims, _ := c.Locals("claims").(*auth.Claims)
+
+	// Aislamiento multi-tenant: rechazar si el rider no pertenece al evento/club.
+	isMember := func(ctx context.Context, key string, member interface{}) (bool, error) {
+		return redis.Client.SIsMember(ctx, key, member).Result()
+	}
+	getClub := func(ctx context.Context, key string) (string, error) {
+		return redis.Client.Get(ctx, key).Result()
+	}
+	if userID == "" || claims == nil || !authorize(isMember, getClub, eventID, userID, claims) {
+		_ = c.WriteJSON(fiber.Map{"type": "error", "message": "unauthorized for this event"})
+		_ = c.Close()
+		return
+	}
+
+	client := hub.GlobalHub.Register(eventID, userID, c)
 	defer func() {
 		hub.GlobalHub.Unregister(eventID, userID)
 		// Eliminar posición inmediatamente al desconectar (sin esperar el TTL)
 		redis.Client.Del(context.Background(), trackKey(eventID, userID))
 	}()
+
+	// Detectar conexiones zombie: si no hay mensaje en 60s, ReadMessage falla.
+	_ = c.SetReadDeadline(time.Now().Add(wsReadTimeout))
 
 	ttl := positionTTL()
 
@@ -125,14 +244,23 @@ func handleRider(c *websocket.Conn) {
 			break
 		}
 
+		// Renovar el deadline en cada mensaje recibido (keepalive implícito).
+		_ = c.SetReadDeadline(time.Now().Add(wsReadTimeout))
+
 		if mt != websocket.TextMessage {
 			continue
 		}
 
-		// Keepalive ping/pong
+		// Rechazar payloads excesivamente grandes (>64KB) para evitar OOM.
+		if len(msgBytes) > 64*1024 {
+			_ = client.WriteJSON(fiber.Map{"type": "error", "message": "payload too large"})
+			continue
+		}
+
+		// Keepalive ping/pong (a través del Client para no escribir concurrentemente)
 		raw := string(msgBytes)
 		if strings.Contains(raw, `"type":"ping"`) || strings.Contains(raw, `"type": "ping"`) {
-			c.WriteJSON(fiber.Map{"type": "pong"})
+			_ = client.WriteJSON(fiber.Map{"type": "pong"})
 			continue
 		}
 
@@ -167,6 +295,12 @@ func handleRider(c *websocket.Conn) {
 
 // startBroadcaster envía las posiciones activas a todos los clientes cada N segundos.
 func startBroadcaster() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered in startBroadcaster: %v", r)
+		}
+	}()
+
 	ticker := time.NewTicker(broadcastInterval())
 	defer ticker.Stop()
 
@@ -176,33 +310,43 @@ func startBroadcaster() {
 		for _, eventID := range events {
 			ctx := context.Background()
 
-			// ── Fix SCAN en lugar de HGETALL ─────────────────────────────────
+			// ── SCAN + MGET ──────────────────────────────────────────────────
 			// SCAN track:{eventId}:* → solo devuelve keys cuyo TTL no expiró.
-			// Los riders inactivos (sin señal GPS) desaparecen solos del mapa
-			// cuando su key expira, sin necesidad de lógica de limpieza manual.
-			var riders []RiderStatus
+			// Recolectamos todas las keys y hacemos UN solo MGET por evento, en
+			// lugar de N round-trips GET (cuello de botella bajo carga multi-club).
+			var keys []string
 			var cursor uint64
 
 			for {
-				keys, nextCursor, err := redis.Client.Scan(ctx, cursor, trackPattern(eventID), 100).Result()
+				batch, nextCursor, err := redis.Client.Scan(ctx, cursor, trackPattern(eventID), 100).Result()
 				if err != nil {
 					break
 				}
-
-				for _, key := range keys {
-					val, err := redis.Client.Get(ctx, key).Result()
-					if err != nil {
-						continue
-					}
-					var status RiderStatus
-					if json.Unmarshal([]byte(val), &status) == nil {
-						riders = append(riders, status)
-					}
-				}
-
+				keys = append(keys, batch...)
 				cursor = nextCursor
 				if cursor == 0 {
 					break
+				}
+			}
+
+			if len(keys) == 0 {
+				continue
+			}
+
+			vals, err := redis.Client.MGet(ctx, keys...).Result()
+			if err != nil {
+				continue
+			}
+
+			riders := make([]RiderStatus, 0, len(vals))
+			for _, v := range vals {
+				str, ok := v.(string)
+				if !ok {
+					continue
+				}
+				var status RiderStatus
+				if json.Unmarshal([]byte(str), &status) == nil {
+					riders = append(riders, status)
 				}
 			}
 
@@ -215,39 +359,57 @@ func startBroadcaster() {
 				"payload": riders,
 			}
 
-			for _, conn := range hub.GlobalHub.GetEventConnections(eventID) {
-				conn.WriteJSON(broadcastMsg)
+			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
+				_ = client.WriteJSON(broadcastMsg)
 			}
 		}
 	}
 }
 
-// startSOSListener escucha el canal Redis sos:* publicado por NestJS
-// y hace broadcast inmediato a todos los riders del evento afectado.
-func startSOSListener() {
-	pubsub := redis.Client.PSubscribe(context.Background(), "sos:*")
-	defer pubsub.Close()
-
-	for msg := range pubsub.Channel() {
-		// Canal: "sos:{eventId}"
-		parts := strings.Split(msg.Channel, ":")
-		if len(parts) != 2 {
-			continue
+// startSOSListener escucha SOLO los SOS a nivel de evento (sos:event:{id})
+// publicados por NestJS y los reenvía a los riders conectados a ese evento.
+// Los SOS de club/global son responsabilidad de FCM push, no del tracker.
+func startSOSListener(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered in startSOSListener: %v", r)
 		}
-		eventID := parts[1]
+	}()
 
-		var sosPayload interface{}
-		if json.Unmarshal([]byte(msg.Payload), &sosPayload) != nil {
-			continue
-		}
+	pubsub := redis.Client.PSubscribe(context.Background(), "sos:event:*")
+	defer func() {
+		_ = pubsub.Close()
+	}()
 
-		broadcastMsg := map[string]interface{}{
-			"type":    "sos",
-			"payload": sosPayload,
-		}
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			// Canal: "sos:event:{eventId}"
+			parts := strings.SplitN(msg.Channel, ":", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			eventID := parts[2]
 
-		for _, conn := range hub.GlobalHub.GetEventConnections(eventID) {
-			conn.WriteJSON(broadcastMsg)
+			var sosPayload interface{}
+			if json.Unmarshal([]byte(msg.Payload), &sosPayload) != nil {
+				continue
+			}
+
+			broadcastMsg := map[string]interface{}{
+				"type":    "sos",
+				"payload": sosPayload,
+			}
+
+			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
+				_ = client.WriteJSON(broadcastMsg)
+			}
 		}
 	}
 }
