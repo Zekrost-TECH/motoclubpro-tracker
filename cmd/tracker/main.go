@@ -134,7 +134,7 @@ func main() {
 	redis.InitRedis()
 
 	app := fiber.New(fiber.Config{
-		AppName: "IronBykers Tracker v1.0",
+		AppName: "Ironbikers Tracker v1.0",
 	})
 
 	app.Use(fiberLogger.New())
