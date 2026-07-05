@@ -28,7 +28,7 @@ func (c *Claims) IsClubManager(clubID string) bool {
 		return false
 	}
 	for _, club := range c.Clubs {
-		if club.ClubID == clubID && (club.Role == "admin" || club.Role == "lider") {
+		if club.ClubID == clubID && (club.Role == "admin" || club.Role == "leader") {
 			return true
 		}
 	}

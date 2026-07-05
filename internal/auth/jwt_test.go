@@ -94,18 +94,18 @@ func TestClaims_IsClubManager(t *testing.T) {
 	claims := &Claims{
 		Clubs: []Club{
 			{ClubID: "club-1", Role: "admin"},
-			{ClubID: "club-2", Role: "lider"},
+			{ClubID: "club-2", Role: "leader"},
 			{ClubID: "club-3", Role: "rider"},
 		},
 	}
 
 	tests := []struct {
-		name    string
-		clubID  string
-		want    bool
+		name   string
+		clubID string
+		want   bool
 	}{
 		{"admin club", "club-1", true},
-		{"lider club", "club-2", true},
+		{"leader club", "club-2", true},
 		{"rider club", "club-3", false},
 		{"unknown club", "club-4", false},
 		{"empty club", "", false},

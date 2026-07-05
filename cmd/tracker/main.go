@@ -397,14 +397,9 @@ func startSOSListener(ctx context.Context) {
 			}
 			eventID := parts[2]
 
-			var sosPayload interface{}
-			if json.Unmarshal([]byte(msg.Payload), &sosPayload) != nil {
+			var broadcastMsg map[string]interface{}
+			if json.Unmarshal([]byte(msg.Payload), &broadcastMsg) != nil {
 				continue
-			}
-
-			broadcastMsg := map[string]interface{}{
-				"type":    "sos",
-				"payload": sosPayload,
 			}
 
 			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {

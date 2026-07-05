@@ -53,14 +53,14 @@ func TestAuthorize(t *testing.T) {
 		}
 	})
 
-	t.Run("lider of owning club", func(t *testing.T) {
-		liderClaims := &auth.Claims{
-			Clubs: []auth.Club{{ClubID: "club-1", Role: "lider"}},
+	t.Run("leader of owning club", func(t *testing.T) {
+		leaderClaims := &auth.Claims{
+			Clubs: []auth.Club{{ClubID: "club-1", Role: "leader"}},
 		}
 		isMember := func(_ context.Context, _ string, _ interface{}) (bool, error) { return false, nil }
 		getClub := func(_ context.Context, _ string) (string, error) { return "club-1", nil }
-		if !authorize(isMember, getClub, "evt-1", "user-1", liderClaims) {
-			t.Fatal("expected true when user is lider of owning club")
+		if !authorize(isMember, getClub, "evt-1", "user-1", leaderClaims) {
+			t.Fatal("expected true when user is leader of owning club")
 		}
 	})
 
