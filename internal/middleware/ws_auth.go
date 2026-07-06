@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/auth"
-	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/redis"
+	"github.com/DeijoseDevelop/biker-os-tracker/internal/auth"
+	"github.com/DeijoseDevelop/biker-os-tracker/internal/redis"
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 )

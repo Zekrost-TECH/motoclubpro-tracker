@@ -1,4 +1,4 @@
-module github.com/DeijoseDevelop/motoclubpro-tracker
+module github.com/DeijoseDevelop/biker-os-tracker
 
 go 1.26.1
 

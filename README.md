@@ -1,6 +1,6 @@
-# MotoClub Pro Tracker
+# BikerOS Tracker
 
-Servicio de tracking en tiempo real para MotoClub Pro. Gestiona WebSockets para transmision de posiciones GPS durante rodadas, broadcast periodico a todos los riders conectados, y reenvio de alertas SOS via Redis pub/sub.
+Servicio de tracking en tiempo real para BikerOS. Gestiona WebSockets para transmision de posiciones GPS durante rodadas, broadcast periodico a todos los riders conectados, y reenvio de alertas SOS via Redis pub/sub.
 
 ## Stack Tecnologico
 
@@ -97,7 +97,7 @@ internal/
 ## Instalacion
 
 ```bash
-cd motoclubpro-tracker
+cd biker-os-tracker
 
 # Dependencias
 go mod download
@@ -134,18 +134,18 @@ go build -o tracker ./cmd/tracker       # Compilar binario
 
 ```bash
 # Build (imagen ~10MB scratch)
-docker build -f Dockerfile.dev -t motoclubpro-tracker:latest .
+docker build -f Dockerfile.dev -t biker-os-tracker:latest .
 
 # Correr
-docker run -d -p 8081:8081 --env-file .env motoclubpro-tracker:latest
+docker run -d -p 8081:8081 --env-file .env biker-os-tracker:latest
 ```
 
 ## Systemd (VPS)
 
 ```ini
-# /etc/systemd/system/motoclubpro-tracker.service
+# /etc/systemd/system/biker-os-tracker.service
 [Unit]
-Description=MotoClub Pro Tracker
+Description=BikerOS Tracker
 After=network.target
 
 [Service]
@@ -162,8 +162,8 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable motoclubpro-tracker
-sudo systemctl start motoclubpro-tracker
+sudo systemctl enable biker-os-tracker
+sudo systemctl start biker-os-tracker
 ```
 
 ## Documentacion Relacionada

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/DeijoseDevelop/motoclubpro-tracker/internal/auth"
+	"github.com/DeijoseDevelop/biker-os-tracker/internal/auth"
 )
 
 func TestEventKeys(t *testing.T) {
