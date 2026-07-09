@@ -20,7 +20,7 @@ func WsAuth() fiber.Handler {
 			return fiber.ErrUpgradeRequired
 		}
 
-		authHeader := c.Get("Authorization")
+		authHeader := extractToken(c)
 		claims, err := auth.ValidateJWT(authHeader)
 		if err != nil {
 			return fiber.ErrUnauthorized
@@ -41,6 +41,37 @@ func WsAuth() fiber.Handler {
 
 		return c.Next()
 	}
+}
+
+// extractToken intenta obtener el token de múltiples fuentes, ya que el cliente
+// puede enviarlo de distintas formas según la plataforma:
+//   - Header Authorization: Bearer <token>
+//   - Query param ?token=<token>
+//   - Subprotocolo WebSocket: Sec-WebSocket-Protocol: bearer, <token>
+func extractToken(c fiber.Ctx) string {
+	if header := c.Get("Authorization"); header != "" {
+		return header
+	}
+
+	if token := c.Query("token"); token != "" {
+		return "Bearer " + token
+	}
+
+	if proto := c.Get("Sec-WebSocket-Protocol"); proto != "" {
+		// El cliente envía ["bearer", token] y el header resultante es
+		// "bearer, <token>" o "bearer,<token>".
+		parts := strings.Split(proto, ",")
+		for i, p := range parts {
+			p = strings.TrimSpace(p)
+			if strings.EqualFold(p, "bearer") && i+1 < len(parts) {
+				return "Bearer " + strings.TrimSpace(parts[i+1])
+			}
+		}
+		// Si solo viene el token directamente
+		return "Bearer " + strings.TrimSpace(proto)
+	}
+
+	return ""
 }
 
 func extractBearer(header string) string {
