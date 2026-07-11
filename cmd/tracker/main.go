@@ -148,6 +148,7 @@ func main() {
 	app.Get("/ws/events/:eventId", websocket.New(handleRider, websocket.Config{
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
+		Subprotocols:    []string{"bearer"},
 	}))
 
 	go startBroadcaster()
