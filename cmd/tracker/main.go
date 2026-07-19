@@ -47,7 +47,10 @@ type RiderStatus struct {
 func positionTTL() time.Duration {
 	ttl, _ := strconv.Atoi(os.Getenv("POSITION_TTL_SEC"))
 	if ttl == 0 {
-		ttl = 30
+		// 90s por defecto: en carretera la señal se cae con frecuencia y un
+		// TTL de 30s hacía desaparecer riders que seguían rodando. Debe
+		// coincidir con el default del backend NestJS (tracker.service.ts).
+		ttl = 90
 	}
 	return time.Duration(ttl) * time.Second
 }
@@ -225,8 +228,9 @@ func handleRider(c *websocket.Conn) {
 	client := hub.GlobalHub.Register(eventID, userID, c)
 	defer func() {
 		hub.GlobalHub.Unregister(eventID, userID)
-		// Eliminar posición inmediatamente al desconectar (sin esperar el TTL)
-		redis.Client.Del(context.Background(), trackKey(eventID, userID))
+		// NO borrar track:{event}:{user} al desconectar: el rider puede seguir
+		// enviando posiciones por HTTP fallback (app en background, pantalla
+		// apagada). Si realmente dejó de rodar, el TTL expira la key solo.
 	}()
 
 	// Detectar conexiones zombie: si no hay mensaje en 60s, ReadMessage falla.
@@ -258,23 +262,28 @@ func handleRider(c *websocket.Conn) {
 			continue
 		}
 
-		// Keepalive ping/pong (a través del Client para no escribir concurrentemente)
-		raw := string(msgBytes)
-		if strings.Contains(raw, `"type":"ping"`) || strings.Contains(raw, `"type": "ping"`) {
-			_ = client.WriteJSON(fiber.Map{"type": "pong"})
-			continue
-		}
-
 		var msg PositionMsg
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
 			continue
 		}
 
+		// Keepalive ping/pong (a través del Client para no escribir concurrentemente)
+		if msg.Type == "ping" {
+			_ = client.WriteJSON(fiber.Map{"type": "pong"})
+			continue
+		}
+
 		if msg.Type == "position" {
 			status := msg.Payload
-			// Sobreescribir con datos del JWT (no confiamos en lo que el cliente envíe)
+			// userID SIEMPRE del JWT: nadie puede suplantar a otro rider.
 			status.UserID = userID
-			status.Role = role
+
+			// role: el cliente envía su ride_role operativo (puntero, barredora…)
+			// leído de la rodada activa. Se usa solo para display (colores del
+			// radar). Si no viene, cae al rol del sistema del JWT.
+			if msg.Payload.Role == "" {
+				status.Role = role
+			}
 
 			// name viene del cliente — actualizar si viene, conservar el anterior si no
 			if msg.Payload.Name != "" {
