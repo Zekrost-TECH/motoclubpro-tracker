@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -9,7 +10,37 @@ import (
 	"github.com/DeijoseDevelop/biker-os-tracker/internal/redis"
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
+	goredis "github.com/redis/go-redis/v9"
 )
+
+var errBlacklisted = errors.New("token blacklisted")
+
+// existsChecker es el subset de la API de Redis que necesita el check de
+// blacklist (permite testear sin un Redis real).
+type existsChecker interface {
+	Exists(ctx context.Context, keys ...string) *goredis.IntCmd
+}
+
+// checkBlacklist devuelve un error si el token está revocado (blacklist:{token}
+// en Redis) o si Redis no responde (fail-closed). cmdable nil o token vacío
+// se tratan como "no blacklisted".
+func checkBlacklist(cmdable existsChecker, rawToken string) error {
+	if cmdable == nil || rawToken == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	exists, err := cmdable.Exists(ctx, "blacklist:"+rawToken).Result()
+	if err != nil {
+		// Fail-closed: si Redis no responde no podemos confirmar que el
+		// token siga válido → rechazar en lugar de dejar pasar.
+		return err
+	}
+	if exists > 0 {
+		return errBlacklisted
+	}
+	return nil
+}
 
 // WsAuth middleware upgrades the HTTP connection to WebSocket after validating the JWT.
 // It also rejects tokens revoked by the backend (logout) via the Redis blacklist,
@@ -28,15 +59,7 @@ func WsAuth() fiber.Handler {
 
 		// Revocación de tokens: el backend agrega blacklist:{token} en logout.
 		if rawToken := extractBearer(authHeader); rawToken != "" && redis.Client != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			exists, err := redis.Client.Exists(ctx, "blacklist:"+rawToken).Result()
-			if err != nil {
-				// Fail-closed: si Redis no responde no podemos confirmar que
-				// el token siga válido → rechazar en lugar de dejar pasar.
-				return fiber.ErrUnauthorized
-			}
-			if exists > 0 {
+			if err := checkBlacklist(redis.Client, rawToken); err != nil {
 				return fiber.ErrUnauthorized
 			}
 		}
