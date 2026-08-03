@@ -285,6 +285,7 @@ func handleRider(c *websocket.Conn) {
 
 		var msg PositionMsg
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
+			log.Printf("Mensaje JSON inválido descartado (event=%s user=%s): %v", eventID, userID, err)
 			continue
 		}
 
@@ -388,9 +389,11 @@ func startBroadcaster() {
 					continue
 				}
 				var status RiderStatus
-				if json.Unmarshal([]byte(str), &status) == nil {
-					riders = append(riders, status)
+				if err := json.Unmarshal([]byte(str), &status); err != nil {
+					log.Printf("Posición almacenada con JSON inválido (key %q): %v", v, err)
+					continue
 				}
+				riders = append(riders, status)
 			}
 
 			if len(riders) == 0 {
@@ -445,7 +448,8 @@ func startSOSListener(ctx context.Context) {
 			eventID := parts[2]
 
 			var broadcastMsg map[string]interface{}
-			if json.Unmarshal([]byte(msg.Payload), &broadcastMsg) != nil {
+			if err := json.Unmarshal([]byte(msg.Payload), &broadcastMsg); err != nil {
+				log.Printf("Payload SOS con JSON inválido en canal %q: %v", msg.Channel, err)
 				continue
 			}
 
