@@ -33,6 +33,6 @@ COPY --from=builder /app/tracker /tracker
 EXPOSE 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD ["/tracker", "-health"] 
+  CMD ["/tracker", "healthcheck"] 
 
 ENTRYPOINT ["/tracker"]
