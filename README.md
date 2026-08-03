@@ -17,7 +17,7 @@ Servicio de tracking en tiempo real para BikerOS. Gestiona WebSockets para trans
 - **WebSocket por Evento:** Cada rider se conecta a `/ws/events/:eventId`.
 - **Autorizacion:** JWT via middleware `WsAuth`. Solo miembros del evento (RSVP) o admins/lideres del club pueden acceder.
 - **Aislamiento Multi-tenant:** El tracker nunca consulta PostgreSQL. La API publica datos de autorizacion en Redis (`event:{id}:members`, `event:{id}:club`).
-- **TTL por Rider:** Cada posicion se almacena con `SET ... EX 30` (configurable). Si un rider desconecta, su key expira automaticamente.
+- **TTL por Rider:** Cada posicion se almacena con `SET ... EX 90` (configurable; default del backend NestJS). Si un rider desconecta, su key expira automaticamente.
 - **Broadcast:** Goroutine `startBroadcaster` envia posiciones activas cada 2s (configurable) usando `SCAN + MGET` para eficiencia multi-club.
 - **SOS Listener:** Goroutine `startSOSListener` escucha canal Redis `sos:event:*` y reenvia a riders conectados.
 - **Graceful Shutdown:** Cierra WebSockets, pub/sub y Redis limpiamente ante SIGINT/SIGTERM.
@@ -127,7 +127,7 @@ go build -o tracker ./cmd/tracker       # Compilar binario
 | `PORT` / `WS_PORT` | `8081` | Puerto del servidor |
 | `REDIS_URL` | `redis://localhost:6379` | Conexion Redis |
 | `JWT_SECRET` | - | **Requerido.** Secret para validar tokens |
-| `POSITION_TTL_SEC` | `30` | TTL de cada posicion en Redis |
+| `POSITION_TTL_SEC` | `90` | TTL de cada posicion en Redis |
 | `BROADCAST_INTERVAL_SEC` | `2` | Intervalo de broadcast en segundos |
 
 ## Docker
