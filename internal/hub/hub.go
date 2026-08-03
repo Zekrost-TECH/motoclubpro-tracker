@@ -15,8 +15,10 @@ const writeTimeout = 5 * time.Second
 // Gorilla/fasthttp connections are NOT safe for concurrent writes, so every
 // write (broadcaster tick + SOS push) must go through WriteJSON.
 type Client struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	eventID string
+	userID  string
+	conn    *websocket.Conn
+	mu      sync.Mutex
 }
 
 // WriteJSON serializes a safe, time-bounded write to the underlying connection.
@@ -25,6 +27,12 @@ func (c *Client) WriteJSON(v interface{}) error {
 	defer c.mu.Unlock()
 	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.conn.WriteJSON(v)
+}
+
+// Close cierra la conexión subyacente (idempotente a nivel de goroutine
+// del conn: Close() sobre una conexión ya cerrada solo devuelve error).
+func (c *Client) Close() {
+	_ = c.conn.Close()
 }
 
 // Hub manages WebSocket connections grouped by event and user.
@@ -39,6 +47,10 @@ var GlobalHub = &Hub{
 }
 
 // Register connects a user to a specific event and returns its Client wrapper.
+// Si el usuario ya tenía una conexión para ese evento (reconexión), la
+// conexión vieja se cierra para no dejar sockets huérfanos. El borrado de la
+// goroutine vieja es por puntero (UnregisterClient), así nunca elimina al
+// cliente nuevo.
 func (h *Hub) Register(eventID, userID string, conn *websocket.Conn) *Client {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -46,12 +58,17 @@ func (h *Hub) Register(eventID, userID string, conn *websocket.Conn) *Client {
 	if h.events[eventID] == nil {
 		h.events[eventID] = make(map[string]*Client)
 	}
-	client := &Client{conn: conn}
+	client := &Client{eventID: eventID, userID: userID, conn: conn}
+	if old, ok := h.events[eventID][userID]; ok && old != client {
+		old.Close()
+	}
 	h.events[eventID][userID] = client
 	return client
 }
 
-// Unregister disconnects a user from a specific event
+// Unregister disconnects a user from a specific event (solo si el cliente
+// almacenado sigue siendo el mismo: evita que una reconexión sea desregistrada
+// por la goroutine de la conexión vieja).
 func (h *Hub) Unregister(eventID, userID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -62,6 +79,24 @@ func (h *Hub) Unregister(eventID, userID string) {
 			delete(h.events, eventID)
 		}
 	}
+}
+
+// UnregisterClient removes a specific client (by pointer) from the hub and
+// closes its connection. Usado por el broadcaster/SOS cuando WriteJSON falla
+// (cliente muerto) y por la goroutine del rider al salir.
+func (h *Hub) UnregisterClient(eventID string, client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if eventMap, ok := h.events[eventID]; ok {
+		if cur, ok := eventMap[client.userID]; ok && cur == client {
+			delete(eventMap, client.userID)
+			if len(eventMap) == 0 {
+				delete(h.events, eventID)
+			}
+		}
+	}
+	client.Close()
 }
 
 // GetEventConnections retrieves all active clients for a given event

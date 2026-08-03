@@ -227,7 +227,7 @@ func handleRider(c *websocket.Conn) {
 
 	client := hub.GlobalHub.Register(eventID, userID, c)
 	defer func() {
-		hub.GlobalHub.Unregister(eventID, userID)
+		hub.GlobalHub.UnregisterClient(eventID, client)
 		// NO borrar track:{event}:{user} al desconectar: el rider puede seguir
 		// enviando posiciones por HTTP fallback (app en background, pantalla
 		// apagada). Si realmente dejó de rodar, el TTL expira la key solo.
@@ -372,7 +372,11 @@ func startBroadcaster() {
 			}
 
 			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
-				_ = client.WriteJSON(broadcastMsg)
+				if err := client.WriteJSON(broadcastMsg); err != nil {
+					// Cliente muerto: purgarlo del hub y cerrar su conexión
+					// para no seguir escribiendo sobre sockets rotos.
+					hub.GlobalHub.UnregisterClient(eventID, client)
+				}
 			}
 		}
 	}
@@ -415,7 +419,11 @@ func startSOSListener(ctx context.Context) {
 			}
 
 			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
-				_ = client.WriteJSON(broadcastMsg)
+				if err := client.WriteJSON(broadcastMsg); err != nil {
+					// Cliente muerto: purgarlo del hub y cerrar su conexión
+					// para no seguir escribiendo sobre sockets rotos.
+					hub.GlobalHub.UnregisterClient(eventID, client)
+				}
 			}
 		}
 	}
