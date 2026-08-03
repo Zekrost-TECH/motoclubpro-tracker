@@ -330,9 +330,77 @@ func handleRider(c *websocket.Conn) {
 			// Cada rider tiene su propio key con TTL independiente.
 			// Si Carlos deja de enviar posición, su key expira solo
 			// sin afectar a los demás riders del mismo evento.
-			if err := redis.Client.Set(context.Background(), trackKey(eventID, userID), string(valBytes), ttl).Err(); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := redis.Client.Set(ctx, trackKey(eventID, userID), string(valBytes), ttl).Err(); err != nil {
 				log.Printf("Error guardando posición en Redis (event=%s user=%s): %v", eventID, userID, err)
 			}
+			cancel()
+		}
+	}
+}
+
+// broadcastEventPositions envía las posiciones activas de un evento a sus
+// clientes conectados (SCAN + MGET con timeout para no bloquear el ciclo).
+func broadcastEventPositions(eventID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// ── SCAN + MGET ──────────────────────────────────────────────────
+	// SCAN track:{eventId}:* → solo devuelve keys cuyo TTL no expiró.
+	// Recolectamos todas las keys y hacemos UN solo MGET por evento, en
+	// lugar de N round-trips GET (cuello de botella bajo carga multi-club).
+	var keys []string
+	var cursor uint64
+
+	for {
+		batch, nextCursor, err := redis.Client.Scan(ctx, cursor, trackPattern(eventID), 100).Result()
+		if err != nil {
+			return
+		}
+		keys = append(keys, batch...)
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	if len(keys) == 0 {
+		return
+	}
+
+	vals, err := redis.Client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return
+	}
+
+	riders := make([]RiderStatus, 0, len(vals))
+	for _, v := range vals {
+		str, ok := v.(string)
+		if !ok {
+			continue
+		}
+		var status RiderStatus
+		if err := json.Unmarshal([]byte(str), &status); err != nil {
+			log.Printf("Posición almacenada con JSON inválido (key %q): %v", v, err)
+			continue
+		}
+		riders = append(riders, status)
+	}
+
+	if len(riders) == 0 {
+		return
+	}
+
+	broadcastMsg := map[string]interface{}{
+		"type":    "riders",
+		"payload": riders,
+	}
+
+	for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
+		if err := client.WriteJSON(broadcastMsg); err != nil {
+			// Cliente muerto: purgarlo del hub y cerrar su conexión
+			// para no seguir escribiendo sobre sockets rotos.
+			hub.GlobalHub.UnregisterClient(eventID, client)
 		}
 	}
 }
@@ -349,69 +417,8 @@ func startBroadcaster() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		events := hub.GlobalHub.GetActiveEvents()
-
-		for _, eventID := range events {
-			ctx := context.Background()
-
-			// ── SCAN + MGET ──────────────────────────────────────────────────
-			// SCAN track:{eventId}:* → solo devuelve keys cuyo TTL no expiró.
-			// Recolectamos todas las keys y hacemos UN solo MGET por evento, en
-			// lugar de N round-trips GET (cuello de botella bajo carga multi-club).
-			var keys []string
-			var cursor uint64
-
-			for {
-				batch, nextCursor, err := redis.Client.Scan(ctx, cursor, trackPattern(eventID), 100).Result()
-				if err != nil {
-					break
-				}
-				keys = append(keys, batch...)
-				cursor = nextCursor
-				if cursor == 0 {
-					break
-				}
-			}
-
-			if len(keys) == 0 {
-				continue
-			}
-
-			vals, err := redis.Client.MGet(ctx, keys...).Result()
-			if err != nil {
-				continue
-			}
-
-			riders := make([]RiderStatus, 0, len(vals))
-			for _, v := range vals {
-				str, ok := v.(string)
-				if !ok {
-					continue
-				}
-				var status RiderStatus
-				if err := json.Unmarshal([]byte(str), &status); err != nil {
-					log.Printf("Posición almacenada con JSON inválido (key %q): %v", v, err)
-					continue
-				}
-				riders = append(riders, status)
-			}
-
-			if len(riders) == 0 {
-				continue
-			}
-
-			broadcastMsg := map[string]interface{}{
-				"type":    "riders",
-				"payload": riders,
-			}
-
-			for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
-				if err := client.WriteJSON(broadcastMsg); err != nil {
-					// Cliente muerto: purgarlo del hub y cerrar su conexión
-					// para no seguir escribiendo sobre sockets rotos.
-					hub.GlobalHub.UnregisterClient(eventID, client)
-				}
-			}
+		for _, eventID := range hub.GlobalHub.GetActiveEvents() {
+			broadcastEventPositions(eventID)
 		}
 	}
 }
