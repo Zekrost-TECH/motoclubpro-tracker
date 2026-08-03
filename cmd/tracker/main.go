@@ -298,7 +298,9 @@ func handleRider(c *websocket.Conn) {
 			// Cada rider tiene su propio key con TTL independiente.
 			// Si Carlos deja de enviar posición, su key expira solo
 			// sin afectar a los demás riders del mismo evento.
-			redis.Client.Set(context.Background(), trackKey(eventID, userID), string(valBytes), ttl)
+			if err := redis.Client.Set(context.Background(), trackKey(eventID, userID), string(valBytes), ttl).Err(); err != nil {
+				log.Printf("Error guardando posición en Redis (event=%s user=%s): %v", eventID, userID, err)
+			}
 		}
 	}
 }
