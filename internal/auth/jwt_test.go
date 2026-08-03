@@ -18,6 +18,8 @@ func TestValidateJWT(t *testing.T) {
 		Role:  "admin",
 		Clubs: []Club{{ClubID: "club-1", Role: "admin"}},
 		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    expectedIssuer,
+			Audience:  jwt.ClaimStrings{expectedAudience},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
 		},
 	})
@@ -79,6 +81,8 @@ func TestValidateJWT(t *testing.T) {
 		expiredToken := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
 			Sub: "user-1",
 			RegisteredClaims: jwt.RegisteredClaims{
+				Issuer:    expectedIssuer,
+				Audience:  jwt.ClaimStrings{expectedAudience},
 				ExpiresAt: jwt.NewNumericDate(time.Now().Add(-1 * time.Hour)),
 			},
 		})
@@ -86,6 +90,36 @@ func TestValidateJWT(t *testing.T) {
 		_, err := ValidateJWT("Bearer " + expiredTokenStr)
 		if err == nil {
 			t.Fatal("expected error for expired token")
+		}
+	})
+
+	t.Run("wrong issuer", func(t *testing.T) {
+		badToken, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
+			Sub: "user-1",
+			RegisteredClaims: jwt.RegisteredClaims{
+				Issuer:    "evil-issuer",
+				Audience:  jwt.ClaimStrings{expectedAudience},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+			},
+		}).SignedString([]byte(secret))
+		_, err := ValidateJWT("Bearer " + badToken)
+		if err == nil {
+			t.Fatal("expected error for wrong issuer")
+		}
+	})
+
+	t.Run("wrong audience", func(t *testing.T) {
+		badToken, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
+			Sub: "user-1",
+			RegisteredClaims: jwt.RegisteredClaims{
+				Issuer:    expectedIssuer,
+				Audience:  jwt.ClaimStrings{"another-client"},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+			},
+		}).SignedString([]byte(secret))
+		_, err := ValidateJWT("Bearer " + badToken)
+		if err == nil {
+			t.Fatal("expected error for wrong audience")
 		}
 	})
 }

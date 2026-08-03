@@ -35,6 +35,13 @@ func (c *Claims) IsClubManager(clubID string) bool {
 	return false
 }
 
+// Emisor y audiencia esperados en los tokens emitidos por el backend NestJS.
+// El backend los firma con estas opciones (ver auth.module.ts).
+const (
+	expectedIssuer   = "biker-os-api"
+	expectedAudience = "biker-os-clients"
+)
+
 // ValidateJWT parses the raw Authorization header and returns the claims
 func ValidateJWT(authHeader string) (*Claims, error) {
 	if authHeader == "" {
@@ -58,7 +65,7 @@ func ValidateJWT(authHeader string) (*Claims, error) {
 			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithIssuer(expectedIssuer), jwt.WithAudience(expectedAudience))
 
 	if err != nil {
 		return nil, err
