@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 	fiberLogger "github.com/gofiber/fiber/v3/middleware/logger"
+	fiberLimiter "github.com/gofiber/fiber/v3/middleware/limiter"
 	fiberRecover "github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/joho/godotenv"
 )
@@ -143,6 +144,16 @@ func main() {
 	app.Use(fiberLogger.New())
 	app.Use(fiberRecover.New())
 
+	// Rate limit de handshakes WebSocket por IP (máx 60 upgrades/minuto):
+	// evita que un cliente abra cientos de conexiones WS.
+	app.Use("/ws", fiberLimiter.New(fiberLimiter.Config{
+		Max:        60,
+		Expiration: time.Minute,
+		LimitReached: func(c fiber.Ctx) error {
+			return fiber.ErrTooManyRequests
+		},
+	}))
+
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "service": "tracker"})
 	})
@@ -243,6 +254,16 @@ func handleRider(c *websocket.Conn) {
 	// Si un mensaje llega sin name usamos el último que recibimos.
 	var lastName string
 
+	// Rate limit por conexión: los clientes legítimos envían 1 posición cada
+	// ~3s (throttle del app). Se limita a 100 mensajes por ventana de 30s
+	// para evitar abuso/amplificación.
+	const (
+		rateWindow = 30 * time.Second
+		rateMax    = 100
+	)
+	rateCount := 0
+	rateWindowAt := time.Now()
+
 	for {
 		mt, msgBytes, err := c.ReadMessage()
 		if err != nil {
@@ -265,6 +286,16 @@ func handleRider(c *websocket.Conn) {
 		var msg PositionMsg
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
 			continue
+		}
+
+		rateCount++
+		if time.Since(rateWindowAt) > rateWindow {
+			rateCount = 1
+			rateWindowAt = time.Now()
+		}
+		if rateCount > rateMax {
+			_ = client.WriteJSON(fiber.Map{"type": "error", "message": "rate limit exceeded"})
+			break
 		}
 
 		// Keepalive ping/pong (a través del Client para no escribir concurrentemente)
