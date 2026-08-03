@@ -30,7 +30,13 @@ func WsAuth() fiber.Handler {
 		if rawToken := extractBearer(authHeader); rawToken != "" && redis.Client != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			if exists, _ := redis.Client.Exists(ctx, "blacklist:"+rawToken).Result(); exists > 0 {
+			exists, err := redis.Client.Exists(ctx, "blacklist:"+rawToken).Result()
+			if err != nil {
+				// Fail-closed: si Redis no responde no podemos confirmar que
+				// el token siga válido → rechazar en lugar de dejar pasar.
+				return fiber.ErrUnauthorized
+			}
+			if exists > 0 {
 				return fiber.ErrUnauthorized
 			}
 		}
