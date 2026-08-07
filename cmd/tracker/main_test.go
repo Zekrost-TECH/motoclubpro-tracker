@@ -96,3 +96,66 @@ func TestAuthorize(t *testing.T) {
 		}
 	})
 }
+
+func TestValidPosition(t *testing.T) {
+	cases := []struct {
+		name string
+		pos  RiderStatus
+		want bool
+	}{
+		{"posición válida", RiderStatus{Lat: 10.98, Lng: -74.78, Speed: 42}, true},
+		{"origen", RiderStatus{Lat: 0, Lng: 0, Speed: 0}, true},
+		{"lat fuera de rango", RiderStatus{Lat: 91, Lng: 0, Speed: 0}, false},
+		{"lat negativa fuera de rango", RiderStatus{Lat: -91, Lng: 0, Speed: 0}, false},
+		{"lng fuera de rango", RiderStatus{Lat: 10, Lng: 181, Speed: 0}, false},
+		{"lng negativa fuera de rango", RiderStatus{Lat: 10, Lng: -181, Speed: 0}, false},
+		{"velocidad negativa", RiderStatus{Lat: 10, Lng: 0, Speed: -1}, false},
+		{"velocidad absurda (>500 m/s)", RiderStatus{Lat: 10, Lng: 0, Speed: 501}, false},
+		{"velocidad límite", RiderStatus{Lat: 10, Lng: 0, Speed: 500}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := validPosition(c.pos); got != c.want {
+				t.Fatalf("validPosition(%+v) = %v, want %v", c.pos, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveRiderRole(t *testing.T) {
+	cases := []struct {
+		name, stored, client, jwt, want string
+	}{
+		{"rol canónico de Redis tiene prioridad", "puntero", "rider", "rider", "puntero"},
+		{"sin rol canónico usa el del cliente", "", "barredora", "rider", "barredora"},
+		{"sin rol canónico ni de cliente usa el JWT", "", "", "leader", "leader"},
+		{"rol canónico vacío cae al cliente", " ", "capitan_ruta", "rider", "capitan_ruta"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveRiderRole(c.stored, c.client, c.jwt); got != c.want {
+				t.Fatalf("resolveRiderRole(%q,%q,%q) = %q, want %q", c.stored, c.client, c.jwt, got, c.want)
+			}
+		})
+	}
+}
+
+func TestParseStatusChannel(t *testing.T) {
+	valid := "event:632abac9-e3e4-42c1-a74a-17ae91b7de3d:status"
+	id, ok := parseStatusChannel(valid)
+	if !ok || id != "632abac9-e3e4-42c1-a74a-17ae91b7de3d" {
+		t.Fatalf("parseStatusChannel(%q) = (%q,%v), want (eventId,true)", valid, id, ok)
+	}
+
+	bad := []string{
+		"sos:event:abc",
+		"event:abc:members",
+		"event:abc",
+		"",
+	}
+	for _, ch := range bad {
+		if _, ok := parseStatusChannel(ch); ok {
+			t.Fatalf("parseStatusChannel(%q) = ok, want not ok", ch)
+		}
+	}
+}

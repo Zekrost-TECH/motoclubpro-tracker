@@ -83,6 +83,36 @@ func trackPattern(eventID string) string {
 func eventMembersKey(eventID string) string { return "event:" + eventID + ":members" }
 func eventClubKey(eventID string) string    { return "event:" + eventID + ":club" }
 
+// eventRolesKey: HASH userId → ride_role (rol canónico del radar).
+// Lo publica el backend (syncTrackerAuth, RSVP, updateAttendeeRole). Si existe,
+// tiene prioridad sobre el rol que envía el cliente (ROD-07).
+func eventRolesKey(eventID string) string { return "event:" + eventID + ":roles" }
+
+// validPosition: sanity check de coordenadas y velocidad antes de guardar y
+// broadcastear (ROD-08). Descarta GPS corrupto/manipulado.
+func validPosition(s RiderStatus) bool {
+	if s.Lat < -90 || s.Lat > 90 || s.Lng < -180 || s.Lng > 180 {
+		return false
+	}
+	if s.Speed < 0 || s.Speed > 500 {
+		return false
+	}
+	return true
+}
+
+// resolveRiderRole: prioridad del rol canónico almacenado en Redis (event:{id}:roles);
+// si no existe, el rol que envía el cliente; si tampoco, el rol del JWT.
+func resolveRiderRole(storedRole, clientRole, jwtRole string) string {
+	storedRole = strings.TrimSpace(storedRole)
+	if storedRole != "" {
+		return storedRole
+	}
+	if clientRole != "" {
+		return clientRole
+	}
+	return jwtRole
+}
+
 // authorize decide si un rider puede ver el tracking de un evento.
 // Aislamiento multi-tenant: solo miembros del evento (RSVP) o admins/líderes
 // del club dueño del evento. El tracker NUNCA consulta Postgres: la verdad
@@ -170,6 +200,11 @@ func main() {
 	sosCtx, sosCancel := context.WithCancel(context.Background())
 	go startSOSListener(sosCtx)
 
+	// ROD-02/09: el backend publica cambios de estado en event:{id}:status;
+	// el tracker cierra los WS del evento y purga sus posiciones al terminar.
+	statusCtx, statusCancel := context.WithCancel(context.Background())
+	go startEventStatusListener(statusCtx)
+
 	port := os.Getenv("WS_PORT")
 	if port == "" {
 		port = "8081"
@@ -189,8 +224,9 @@ func main() {
 	<-quit
 	log.Println("Señal de apagado recibida, cerrando tracker...")
 
-	// Detener el SOS listener primero para que cierre el pubsub antes de matar Redis.
+	// Detener los listeners primero para que cierren los pubsub antes de matar Redis.
 	sosCancel()
+	statusCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -265,6 +301,13 @@ func handleRider(c *websocket.Conn) {
 	rateWindowAt := time.Now()
 
 	for {
+		// Si el cliente fue cerrado desde otra goroutine (purgeEvent por fin de
+		// rodada, reconexión), salir aunque un mensaje hubiera renovado el
+		// deadline: el socket real solo se cierra cuando este handler retorna.
+		if client.IsClosed() {
+			break
+		}
+
 		mt, msgBytes, err := c.ReadMessage()
 		if err != nil {
 			break
@@ -310,12 +353,20 @@ func handleRider(c *websocket.Conn) {
 			// userID SIEMPRE del JWT: nadie puede suplantar a otro rider.
 			status.UserID = userID
 
-			// role: el cliente envía su ride_role operativo (puntero, barredora…)
-			// leído de la rodada activa. Se usa solo para display (colores del
-			// radar). Si no viene, cae al rol del sistema del JWT.
-			if msg.Payload.Role == "" {
-				status.Role = role
+			// ROD-08: descartar coordenadas fuera de rango antes de tocar Redis.
+			if !validPosition(status) {
+				_ = client.WriteJSON(fiber.Map{"type": "error", "message": "invalid position"})
+				continue
 			}
+
+			// ROD-07: rol canónico desde Redis (event:{id}:roles), publicado por
+			// el backend en RSVP/syncTrackerAuth/updateAttendeeRole. Si existe,
+			// tiene prioridad sobre el rol del cliente y del JWT.
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+			storedRole, _ := redis.Client.HGet(ctx2, eventRolesKey(eventID), userID).Result()
+			cancel2()
+
+			status.Role = resolveRiderRole(storedRole, msg.Payload.Role, role)
 
 			// name viene del cliente — actualizar si viene, conservar el anterior si no
 			if msg.Payload.Name != "" {
@@ -419,6 +470,111 @@ func startBroadcaster() {
 	for range ticker.C {
 		for _, eventID := range hub.GlobalHub.GetActiveEvents() {
 			broadcastEventPositions(eventID)
+		}
+	}
+}
+
+// parseStatusChannel extrae el eventId de un canal "event:{eventId}:status".
+// Devuelve ("", false) si el canal no coincide con el contrato.
+func parseStatusChannel(channel string) (eventID string, ok bool) {
+	parts := strings.SplitN(channel, ":", 3)
+	if len(parts) != 3 || parts[0] != "event" || parts[2] != "status" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// purgeEvent: al terminar/cancelar una rodada, cierra los sockets de ese evento
+// (notificando el cambio de estado a las apps) y purga las posiciones track:*.
+func purgeEvent(eventID string, payload map[string]interface{}) {
+	// 1. Notificar y cerrar cada cliente conectado al evento.
+	// Close() despierta el read loop del handler (ver hub.Client.Close):
+	// el socket real se cierra cuando handleRider retorna.
+	for _, client := range hub.GlobalHub.GetEventConnections(eventID) {
+		_ = client.WriteJSON(payload)
+		client.Close()
+		hub.GlobalHub.UnregisterClient(eventID, client)
+	}
+
+	// 2. Purgar las posiciones del evento (track:{eventId}:*) para que el
+	//    radar muera de inmediato (no esperar el TTL).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var keys []string
+	var cursor uint64
+	for {
+		batch, nextCursor, err := redis.Client.Scan(ctx, cursor, trackPattern(eventID), 100).Result()
+		if err != nil {
+			log.Printf("Error purgando posiciones (event=%s): %v", eventID, err)
+			return
+		}
+		keys = append(keys, batch...)
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	if len(keys) > 0 {
+		if err := redis.Client.Del(ctx, keys...).Err(); err != nil {
+			log.Printf("Error borrando posiciones (event=%s): %v", eventID, err)
+		}
+	}
+
+	// 3. Quitar la autorización del evento (members/roles): si un rider intenta
+	//    reconectar después de terminar la rodada, el tracker lo rechaza en
+	//    lugar de dejar un socket colgado esperando broadcasts que no llegarán.
+	//    El backend re-crea ambas claves cuando la rodada vuelve a en_curso
+	//    (syncTrackerAuth en updateStatus).
+	if err := redis.Client.Del(ctx, eventMembersKey(eventID), eventRolesKey(eventID)).Err(); err != nil {
+		log.Printf("Error borrando autorización (event=%s): %v", eventID, err)
+	}
+}
+
+// startEventStatusListener escucha el canal Redis event:{id}:status publicado
+// por el backend cuando una rodada cambia de estado. Solo actúa cuando el
+// evento deja de estar en curso: cierra los WS del evento y purga sus
+// posiciones. Si vuelve a en_curso, no hace nada (los riders reconectan).
+func startEventStatusListener(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered in startEventStatusListener: %v", r)
+		}
+	}()
+
+	pubsub := redis.Client.PSubscribe(context.Background(), "event:*:status")
+	defer func() {
+		_ = pubsub.Close()
+	}()
+
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			eventID, ok := parseStatusChannel(msg.Channel)
+			if !ok {
+				continue
+			}
+
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+				log.Printf("Payload de estado con JSON inválido en canal %q: %v", msg.Channel, err)
+				continue
+			}
+
+			status, _ := payload["payload"].(map[string]interface{})["status"].(string)
+			if status == "en_curso" {
+				continue
+			}
+
+			log.Printf("Rodada %s ya no está en curso (status=%s) — cerrando radar", eventID, status)
+			purgeEvent(eventID, payload)
 		}
 	}
 }

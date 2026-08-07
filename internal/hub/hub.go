@@ -2,6 +2,7 @@ package hub
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/contrib/v3/websocket"
@@ -19,6 +20,7 @@ type Client struct {
 	userID  string
 	conn    *websocket.Conn
 	mu      sync.Mutex
+	closed  atomic.Bool
 }
 
 // WriteJSON serializes a safe, time-bounded write to the underlying connection.
@@ -29,11 +31,25 @@ func (c *Client) WriteJSON(v interface{}) error {
 	return c.conn.WriteJSON(v)
 }
 
-// Close cierra la conexión subyacente (idempotente a nivel de goroutine
-// del conn: Close() sobre una conexión ya cerrada solo devuelve error).
+// Close marca el cliente como cerrado y lo despierta.
+//
+// IMPORTANTE: con fasthttp, la conexión hijackeada es un *hijackConn cuyo
+// Close() es un NO-OP cuando el servidor corre con KeepHijackedConns=false
+// (el default): el socket real SOLO se cierra cuando el handler del WebSocket
+// (handleRider) retorna. Por eso, además de cerrar, se fuerza un read deadline
+// para que el read loop bloqueado salga y el handler termine.
 func (c *Client) Close() {
-	_ = c.conn.Close()
+	if c.closed.CompareAndSwap(false, true) {
+		if c.conn != nil {
+			_ = c.conn.SetReadDeadline(time.Now())
+			_ = c.conn.Close()
+		}
+	}
 }
+
+// IsClosed reporta si el cliente fue cerrado (para que el read loop del
+// handler corte también cuando recibe un mensaje justo después del cierre).
+func (c *Client) IsClosed() bool { return c.closed.Load() }
 
 // Hub manages WebSocket connections grouped by event and user.
 type Hub struct {
