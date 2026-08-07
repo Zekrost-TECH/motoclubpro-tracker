@@ -43,6 +43,9 @@ type RiderStatus struct {
 	Role      string  `json:"role,omitempty"`
 	UserID    string  `json:"userId,omitempty"`
 	Name      string  `json:"name,omitempty"`
+	Battery   int     `json:"battery"` // 0-100; 0 es un valor válido (batería agotada)
+	// IsCharging indica si el dispositivo del rider está cargando.
+	IsCharging bool `json:"isCharging,omitempty"`
 }
 
 func positionTTL() time.Duration {
