@@ -1,0 +1,52 @@
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tracker-integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: test-secret-for-integration
+      WS_PORT: 8081
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Start tracker
+        run: |
+          ./tracker > /tmp/tracker.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8081/health && break || sleep 1
+          done
+          curl -sf http://localhost:8081/health/ready
+          curl -sf http://localhost:8081/stats
+
+      - name: Integration test (flujo completo)
+        run: node scripts/integration.mjs
+        env:
+          JWT_SECRET: test-secret-for-integration
+          REDIS_URL: redis://localhost:6379
+          TRACKER_WS_URL: ws://localhost:8081

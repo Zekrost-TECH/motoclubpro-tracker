@@ -1,0 +1,8 @@
+{
+  "name": "biker-os-tracker-integration",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "ioredis": "^5.4.0"
+  }
+}
