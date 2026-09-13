@@ -155,6 +155,9 @@ func runHealthcheck() {
 	os.Exit(0)
 }
 
+// startTime marca el arranque del proceso (para /stats, ROD-22).
+var startTime = time.Now()
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		runHealthcheck()
@@ -189,6 +192,39 @@ func main() {
 
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "service": "tracker"})
+	})
+
+	// ROD-21: readiness real — verifica Redis con PING. El /health simple solo
+	// prueba que el proceso está vivo; con Redis caído el tracker está
+	// funcionalmente muerto pero "saludable". Usar en healthchecks de Docker/
+	// Railway y en uptime checks.
+	app.Get("/health/ready", func(c fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := redis.Client.Ping(ctx).Err(); err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "error", "service": "tracker", "redis": "down",
+			})
+		}
+		return c.JSON(fiber.Map{"status": "ok", "service": "tracker", "redis": "ok"})
+	})
+
+	// ROD-22: estadísticas para diagnóstico en producción sin logs.
+	app.Get("/stats", func(c fiber.Ctx) error {
+		events := hub.GlobalHub.GetActiveEvents()
+		detail := make([]fiber.Map, 0, len(events))
+		totalConnections := 0
+		for _, eventID := range events {
+			conns := hub.GlobalHub.GetEventConnections(eventID)
+			totalConnections += len(conns)
+			detail = append(detail, fiber.Map{"event": eventID, "connections": len(conns)})
+		}
+		return c.JSON(fiber.Map{
+			"uptimeSeconds":   int(time.Since(startTime).Seconds()),
+			"activeEvents":    len(events),
+			"totalConnections": totalConnections,
+			"events":          detail,
+		})
 	})
 
 	app.Use("/ws", middleware.WsAuth())
